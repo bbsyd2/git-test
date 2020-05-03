@@ -1,0 +1,260 @@
+https://hub.docker.com/r/hyper/docker-registry-web
+
+# 快速启动（配置环境变量，无身份验证）
+# 不要将 registry 用作 registry 容器名，它将中断 REGISTRY_NAME 环境变量
+docker run -d -p 5000:5000 --name registry-srv registry:2
+docker run -it -p 8080:8080 --name registry-web --link registry-srv -e REGISTRY_URL=http://registry-srv:5000/v2 -e REGISTRY_NAME=localhost:5000 hyper/docker-registry-web 
+
+# 同上，使用配置文件
+~~~~~~~~~~~ config.yml
+registry:
+  url: http://registry-srv:5000/v2
+  name: localhost:5000
+  readonly: false
+  auth:
+    enabled: false
+docker run -d -p 5000:5000 --name registry-srv registry:2
+docker run -it -p 8080:8080 --name registry-web --link registry-srv -v $(pwd)/config.yml:/conf/config.yml:ro hyper/docker-registry-web
+
+# 连接到启用了基本身份验证, 及使用了自签名证书的 registry-srv
+docker run -it -p 8080:8080 --name registry-web --link registry-srv \
+           -e REGISTRY_URL=https://registry-srv:5000/v2 \
+           -e REGISTRY_TRUST_ANY_SSL=true \
+           -e REGISTRY_BASIC_AUTH="YWRtaW46Y2hhbmdlbWU=" \
+           -e REGISTRY_NAME=localhost:5000 hyper/docker-registry-web
+
+# 同上，使用配置文件
+mkdir conf
+openssl req -new -newkey rsa:4096 -days 365 -subj "/CN=localhost" -nodes -x509 -keyout conf/auth.key -out conf/auth.cert
+~~~~~~~~~~~ conf/registry-srv.yml
+version: 0.1    
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: 0.0.0.0:5000   
+auth:
+  token:
+    # 指定身份验证URL
+    realm: http://localhost:8080/api/auth
+    # 与 registry-web 的 registry.name 一致
+    service: localhost:5000
+    # 与 registry-web 的 registry.auth.issuer 一致
+    issuer: 'my issuer'
+    # 身份验证证书的路径
+    rootcertbundle: /etc/docker/registry/auth.cert
+docker run -v $(pwd)/conf/registry-srv.yml:/etc/docker/registry/config.yml:ro -v $(pwd)/conf/auth.cert:/etc/docker/registry/auth.cert:ro -p 5000:5000  --name registry-srv -d registry:2    
+
+~~~~~~~~~~~ conf/registry-web.yml
+registry:
+  # registry 的访问URL
+  url: http://registry-srv:5000/v2
+  # registry 的域名+端口
+  name: localhost:5000
+  # 允许删除镜像, 默认false
+  readonly: false
+  auth:
+    # 启用基本身份验证
+    enabled: true
+    # 定义 Token
+    issuer: 'my issuer'
+    # 私钥, registry 的 auth.token.rootcertbundle 的证书应该使用此密钥签名
+    key: /conf/auth.key
+docker run -v $(pwd)/conf/registry-web.yml:/conf/config.yml:ro -v $(pwd)/conf/auth.key:/conf/auth.key -v $(pwd)/db:/data -it -p 8080:8080 --link registry-srv --name registry-web hyper/docker-registry-web
+
+
+
+####################################
+
+export DOCKERHUB=/opt/registry/443/registry
+export CERTPATH=/opt/registry/443/certs
+
+docker stop registry-web
+docker rm registry-web
+docker run -d --restart=always \
+  --link myregistry \
+  -v $CERTPATH:/certs \
+  -e REGISTRY_NAME=localhost:5000 \
+  -e REGISTRY_URL=https://myregistry:5000/v2 \
+  -e REGISTRY_AUTH_ENABLED="true" \
+  -e REGISTRY_AUTH_ISSUER="my issuer" \
+  -e READONLY=false \
+  -p 8080:8080 \
+  --name registry-web hyper/docker-registry-web 
+
+docker exec -it registry-web bash
+keytool -import -keystore "/etc/ssl/certs/java/cacerts" -storepass changeit -file ca.cer
+docker restart registry-web
+
+
+# registry 服务
+cat<<EOF>docker-compose.yml
+version: '3'
+services:
+  registry:
+    image: registry:latest
+    ports:
+      - 5000:5000
+    volumes:
+      - ../reg:/var/lib/registry
+      - ../certs:/certs:ro
+    environment:
+      # REGISTRY_STORAGE_DELETE_ENABLED: 'true'
+      # 启用 Basic 登录(本地)
+      # REGISTRY_AUTH_HTPASSWD_REALM: 'Registry Realm'
+      # REGISTRY_AUTH_HTPASSWD_PATH: /certs/htpasswd
+      # 启用 Basic 登录(远程)
+      REGISTRY_AUTH_TOKEN_REALM: http://localhost:8080/api/auth
+      REGISTRY_AUTH_TOKEN_SERVICE: localhost:5000
+      REGISTRY_AUTH_TOKEN_ISSUER: issuer
+      REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE: /certs/auth.cert
+      # 启用HTTPS
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/auth.cert
+      REGISTRY_HTTP_TLS_KEY: /certs/auth.key
+  registry-ui:
+    image: hyper/docker-registry-web:latest
+    depends_on:
+      - registry
+    links:
+      - registry:myregistry
+    ports:
+      - 8080:8080
+    volumes:
+      - ../certs:/certs:ro
+      - ../ui/db:/data
+    environment:
+      REGISTRY_URL: https://myregistry:5000/v2
+      REGISTRY_NAME: localhost:5000
+      REGISTRY_READONLY: 'false'
+      REGISTRY_TRUST_ANY_SSL: 'true'
+      REGISTRY_AUTH_ENABLED: 'true'
+      REGISTRY_AUTH_ISSUER: issuer
+      REGISTRY_AUTH_KEY: /certs/auth.key
+      # 启用HTTPS
+      # REGISTRY_HTTP_TLS_CERTIFICATE: /certs/auth.cert
+      # REGISTRY_HTTP_TLS_KEY: /certs/auth.key
+EOF
+docker-compose down && docker-compose up -d
+docker-compose logs
+curl -XGET -k http://60.60.60.163:5000/v2/_catalog
+curl -XGET -k https://60.60.60.163:5000/v2/_catalog
+
+
+cat<<EOF>conf/registry-web.yml
+registry:
+  url: http://registry-srv:5000/v2
+  name: localhost:5000
+  readonly: false
+  auth:
+    enabled: true
+    issuer: 'my issuer'
+    key: /conf/auth.key
+EOF
+mkdir conf
+openssl req -new -newkey rsa:4096 -days 365 -subj "/CN=localhost" -nodes -x509 -keyout conf/auth.key -out conf/auth.cert
+docker stop registry-srv && docker rm registry-srv
+docker run -v $(pwd)/conf/registry-srv.yml:/etc/docker/registry/config.yml:ro -v $(pwd)/conf/auth.cert:/etc/docker/registry/auth.cert:ro -p 5080:5000 --name registry-srv -d registry:2 
+curl -XGET http://60.60.60.163:5080/v2/_catalog
+docker stop registry-web && docker rm registry-web
+docker run -v $(pwd)/conf/registry-web.yml:/conf/config.yml:ro -v $(pwd)/conf/auth.key:/conf/auth.key -v $(pwd)/db:/data -it -p 8080:8080 --link registry-srv --name registry-web hyper/docker-registry-web
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 仓库配置文件, 只需修改配置中的IP, 其它不用改
+cat<<EOF>conf/registry-srv.yml
+version: 0.1
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+  delete:
+    enabled: true
+http:
+  addr: 0.0.0.0:5000
+  tls:
+    certificate: /certs/ca.crt
+    key: /certs/ca.key
+auth:
+  token:
+    # 外部地址. 用于client验证身份跳转, 所以必须是client能访问到的url
+    realm: http://60.60.60.163:8080/api/auth
+    # 必须等于 registry-web 的 registry.name
+    service: 'localhost'
+    # 必须等于 registry-web 的 registry.auth.issuer
+    issuer: myissuer
+    rootcertbundle: /certs/ca.crt
+notifications:
+  endpoints:
+    - name: listener
+      # 内部地址, 用WEB的服务名即可
+      url: http://registry-web:8080/api/notification
+      timeout: 500ms
+      threshold: 5
+      backoff: 1s
+EOF
+
+# WEB配置文件, 只需修改配置中的IP, 其它不用改
+cat<<EOF>conf/registry-web.yml
+registry:
+  # 内部地址, 用仓库的service名称即可, 还可以用links定义别名
+  url: https://registry-srv:5000/v2
+  # 推荐写成仓库服务器的域名或IP:端口
+  name: 'localhost'
+  readonly: false
+  trust_any_ssl: true
+  auth:
+    enabled: true
+    issuer: myissuer
+    key: /certs/ca.key
+EOF
+
+# 部署文件
+cat<<EOF>docker-compose.yml
+version: '3'
+services:
+  registry-srv:
+    image: registry:latest
+    ports:
+      - 5000:5000
+    volumes:
+      - ./conf/registry-srv.yml:/etc/docker/registry/config.yml:ro
+      - ./certs:/certs:ro
+      - ./data/srv:/var/lib/registry
+    networks:
+      - registry-net
+  registry-web:
+    image: hyper/docker-registry-web:latest
+    ports:
+      - 8080:8080
+    volumes:
+      - ./conf/registry-web.yml:/conf/config.yml:ro
+      - ./certs:/certs:ro
+      - ./data/web:/data
+    networks:
+      - registry-net
+networks:
+  registry-net:
+EOF
+
+# 部署
+docker-compose up -d
+docker-compose restart
+
+docker-compose logs
