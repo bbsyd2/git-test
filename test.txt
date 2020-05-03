@@ -1,3 +1,11 @@
+<<<<<<< HEAD
 asdasd
 asdsa
 fdfsdfd
+=======
+1!@2343
+23445
+runo
+qwe4545
+3454
+>>>>>>> change
